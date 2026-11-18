@@ -66,7 +66,7 @@ EN_DATABRICKS = "DATABRICKS_RUNTIME_VERSION" in os.environ
 
 # --- Origen: external location xloc-raw (solo lectura) ---
 ORIGEN_IMG = "s3://cc3105-raw-869227452861-us-east-2-an/img/"
-RUTA_BRONZE = "s3://cc3105-raw-869227452861-us-east-2-an/equipo4/"
+RUTA_BRONZE = "s3://cc3105-cusn-869227452861-us-east-2-an/equipo4/"   # prefijo del equipo en el bucket bronce
 
 # --- Destino: catálogo propio en Databricks con arquitectura medallón ---
 CATALOGO      = "equipo4"          # si no tienes permiso para crear catálogos se usa CATALOGO_RESPALDO
