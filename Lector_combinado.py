@@ -66,6 +66,7 @@ EN_DATABRICKS = "DATABRICKS_RUNTIME_VERSION" in os.environ
 
 # --- Origen: external location xloc-raw (solo lectura) ---
 ORIGEN_IMG = "s3://cc3105-raw-869227452861-us-east-2-an/img/"
+RUTA_BRONZE = "s3://cc3105-raw-869227452861-us-east-2-an/equipo4/"
 
 # --- Destino: catálogo propio en Databricks con arquitectura medallón ---
 CATALOGO      = "equipo4"          # si no tienes permiso para crear catálogos se usa CATALOGO_RESPALDO
@@ -92,22 +93,24 @@ if EN_DATABRICKS:
         CATALOGO = CATALOGO_RESPALDO
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOGO}.bronze")
 
-    T_BRONZE      = f"{CATALOGO}.bronze.fotos_raw"          # fotos tal cual (binario) + metadatos del archivo
+    T_BRONZE      = f"{CATALOGO}.bronze.fotos_precios"        # nombre que pide el enunciado
     T_BRONZE_LECT = f"{CATALOGO}.bronze.lecturas_raw"       # lo que el lector extrajo de cada foto, sin validar
     CORRECCIONES_UC = f"/Volumes/{CATALOGO}/silver/archivos/correcciones.csv"
 
     # 2) BRONZE: copiar las fotos nuevas o modificadas de xloc-raw (MERGE: no se duplican)
     spark.sql(f"""CREATE TABLE IF NOT EXISTS {T_BRONZE} (
         path STRING, nombre STRING, modificationTime TIMESTAMP, length BIGINT,
-        content BINARY, ingestado_en TIMESTAMP)""")
+        content BINARY, _ingestion_timestamp TIMESTAMP, _source_file STRING)
+        LOCATION '{RUTA_BRONZE}fotos_precios'""")
     try:
         (spark.read.format("binaryFile")
              .option("recursiveFileLookup", "true")        # incluye img/2021, img/2022, ... y las fotos sueltas
              .load(ORIGEN_IMG)
              .filter(F.lower(F.regexp_extract("path", r"(\.[^./]+)$", 1)).isin(list(EXTENSIONES)))
              .withColumn("nombre", F.element_at(F.split("path", "/"), -1))
-             .withColumn("ingestado_en", F.current_timestamp())
-             .select("path", "nombre", "modificationTime", "length", "content", "ingestado_en")
+             .withColumn("_ingestion_timestamp", F.current_timestamp())
+             .withColumn("_source_file", F.col("path"))
+             .select("path", "nombre", "modificationTime", "length", "content", "_ingestion_timestamp", "_source_file")
              .createOrReplaceTempView("_fotos_origen"))
         spark.sql(f"""MERGE INTO {T_BRONZE} t USING _fotos_origen s ON t.path = s.path
                       WHEN MATCHED AND s.modificationTime > t.modificationTime THEN UPDATE SET *
@@ -1282,7 +1285,9 @@ if EN_DATABRICKS:
     # ---- BRONZE: lectura cruda de cada foto (EXIF + precios tal como salieron del lector) ----
     lecturas_raw = df_meta.merge(df_precios, on="archivo", how="left")
     lecturas_raw["procesado_en"] = ahora
-    (a_spark(lecturas_raw).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(T_BRONZE_LECT))
+    spark.sql(f"DROP TABLE IF EXISTS {T_BRONZE_LECT}")      # la versión vieja estaba en el catálogo, no en S3
+    (a_spark(lecturas_raw).write.mode("overwrite").option("overwriteSchema", "true")
+        .option("path", f"{RUTA_BRONZE}lecturas_raw").saveAsTable(T_BRONZE_LECT))
     print(f"Bronze: {T_BRONZE_LECT}  ({len(lecturas_raw)} filas)")
     display(spark.table(T_BRONZE_LECT))
 
@@ -1297,6 +1302,10 @@ else:
 
 # COMMAND ----------
 
+display(dbutils.fs.ls(RUTA_BRONZE))
+
+# COMMAND ----------
+
 # Evolución de precios
 serie = ok.dropna(subset=["fecha_hora"]).set_index("fecha_hora")[COMBUSTIBLES].dropna(axis=1, how="all")
 if len(serie):
@@ -1305,7 +1314,3 @@ if len(serie):
     ax.set_title("Precio por galón"); ax.set_ylabel("Quetzales"); ax.set_xlabel("")
     ax.grid(alpha=0.3)
     plt.tight_layout(); plt.show()
-
-# COMMAND ----------
-
-dbutils.fs.put("s3://cc3105-cusn-869227452861-us-east-2-an/equipo4/prueba_escritura.txt", "hola", True)
