@@ -1,0 +1,8 @@
+services:
+  api:
+    build: .
+    container_name: equipo-04-api
+    env_file: .env
+    ports:
+      - "${PUERTO:-8004}:8000"     # puerto del equipo (80XX) -> puerto interno del contenedor
+    restart: unless-stopped        # sigue corriendo aunque se cierre la sesión SSH o se reinicie el servidor
