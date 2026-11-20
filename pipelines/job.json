@@ -9,7 +9,8 @@
       "cal22272@uvg.edu.gt",
       "mar22398@uvg.edu.gt",
       "pin22880@uvg.edu.gt"
-    ]
+    ],
+    "no_alert_for_skipped_runs": false
   },
   "webhook_notifications": {},
   "timeout_seconds": 0,
@@ -32,6 +33,7 @@
       "retry_on_timeout": false,
       "timeout_seconds": 7200,
       "email_notifications": {},
+      "webhook_notifications": {},
       "disabled": false
     },
     {
@@ -51,6 +53,7 @@
       "retry_on_timeout": false,
       "timeout_seconds": 1800,
       "email_notifications": {},
+      "webhook_notifications": {},
       "disabled": false
     },
     {
@@ -70,6 +73,7 @@
       "retry_on_timeout": false,
       "timeout_seconds": 1800,
       "email_notifications": {},
+      "webhook_notifications": {},
       "disabled": false
     },
     {
@@ -82,10 +86,18 @@
       "run_if": "ALL_SUCCESS",
       "notebook_task": {
         "notebook_path": "pipelines/Gold_pronostico",
+        "base_parameters": {
+          "ruta_oro_s3": "s3://cc3105-au-869227452861-us-east-2-an/equipo4/gold"
+        },
         "source": "GIT"
       },
+      "max_retries": 0,
+      "min_retry_interval_millis": 900000,
+      "retry_on_timeout": false,
+      "disable_auto_optimization": true,
       "timeout_seconds": 3600,
       "email_notifications": {},
+      "webhook_notifications": {},
       "disabled": false
     }
   ],
@@ -96,5 +108,6 @@
   },
   "queue": {
     "enabled": true
-  }
+  },
+  "performance_target": "PERFORMANCE_OPTIMIZED"
 }
