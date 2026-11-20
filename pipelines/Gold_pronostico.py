@@ -253,3 +253,29 @@ if ESCRIBIR:
     guardar(pron.assign(generado_en=ahora), f"{CAT}.gold.pronostico_proxima_semana")
 else:
     print("escribir = no")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 7. Copia de Oro a S3 para la API
+# MAGIC
+# MAGIC La API del Droplet lee la capa Oro desde S3 (no desde Databricks). Si el parámetro `ruta_oro_s3` trae una ruta
+# MAGIC (en el Job: `s3://cc3105-au-869227452861-us-east-2-an/equipo4/gold`), cada tabla Oro se copia como tabla Delta en
+# MAGIC `<ruta_oro_s3>/<tabla>` mediante la external location `xloc-au`. Vacío = no se copia nada.
+
+# COMMAND ----------
+
+RUTA_ORO_S3 = _w("ruta_oro_s3", "", "Ruta S3 de Oro para la API (vacío = no copiar)").strip().rstrip("/")
+TABLAS_API = ["precio_semanal", "variacion_semanal", "features_modelo",
+              "metricas_modelo", "predicciones", "pronostico_proxima_semana"]
+
+if ESCRIBIR and RUTA_ORO_S3:
+    for t in TABLAS_API:
+        destino = f"{RUTA_ORO_S3}/{t}"
+        (spark.table(f"{CAT}.gold.{t}").write.format("delta")
+             .mode("overwrite").option("overwriteSchema", "true")
+             .option("delta.enableDeletionVectors", "false")  # para que deltalake (la API) la pueda leer
+             .save(destino))
+        print(f"copia para la API: {destino}")
+else:
+    print("ruta_oro_s3 vacío o escribir = no: no se copia a S3")
