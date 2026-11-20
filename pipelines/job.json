@@ -1,0 +1,100 @@
+{
+  "name": "equipo-04-pipeline",
+  "description": "Pipeline completo: Lector_combinado (bronze) -> Ingesta_externas (bronze+silver) -> Silver_lecturas (silver) -> Gold_pronostico (gold + modelo champion). Codigo desde GitHub main.",
+  "email_notifications": {
+    "on_failure": [
+      "sal22249@uvg.edu.gt",
+      "agu22243@uvg.edu.gt",
+      "bar22764@uvg.edu.gt",
+      "cal22272@uvg.edu.gt",
+      "mar22398@uvg.edu.gt",
+      "pin22880@uvg.edu.gt"
+    ]
+  },
+  "webhook_notifications": {},
+  "timeout_seconds": 0,
+  "schedule": {
+    "quartz_cron_expression": "0 0 9 ? * TUE",
+    "timezone_id": "America/Guatemala",
+    "pause_status": "UNPAUSED"
+  },
+  "max_concurrent_runs": 1,
+  "tasks": [
+    {
+      "task_key": "lector",
+      "run_if": "ALL_SUCCESS",
+      "notebook_task": {
+        "notebook_path": "pipelines/Lector_combinado",
+        "source": "GIT"
+      },
+      "max_retries": 1,
+      "min_retry_interval_millis": 0,
+      "retry_on_timeout": false,
+      "timeout_seconds": 7200,
+      "email_notifications": {},
+      "disabled": false
+    },
+    {
+      "task_key": "ingesta",
+      "depends_on": [
+        {
+          "task_key": "lector"
+        }
+      ],
+      "run_if": "ALL_SUCCESS",
+      "notebook_task": {
+        "notebook_path": "pipelines/Ingesta_externas",
+        "source": "GIT"
+      },
+      "max_retries": 1,
+      "min_retry_interval_millis": 0,
+      "retry_on_timeout": false,
+      "timeout_seconds": 1800,
+      "email_notifications": {},
+      "disabled": false
+    },
+    {
+      "task_key": "silver",
+      "depends_on": [
+        {
+          "task_key": "ingesta"
+        }
+      ],
+      "run_if": "ALL_SUCCESS",
+      "notebook_task": {
+        "notebook_path": "pipelines/Silver_lecturas",
+        "source": "GIT"
+      },
+      "max_retries": 1,
+      "min_retry_interval_millis": 0,
+      "retry_on_timeout": false,
+      "timeout_seconds": 1800,
+      "email_notifications": {},
+      "disabled": false
+    },
+    {
+      "task_key": "gold",
+      "depends_on": [
+        {
+          "task_key": "silver"
+        }
+      ],
+      "run_if": "ALL_SUCCESS",
+      "notebook_task": {
+        "notebook_path": "pipelines/Gold_pronostico",
+        "source": "GIT"
+      },
+      "timeout_seconds": 3600,
+      "email_notifications": {},
+      "disabled": false
+    }
+  ],
+  "git_source": {
+    "git_url": "https://github.com/paulabaal12/PROY-MLOPS",
+    "git_provider": "gitHub",
+    "git_branch": "main"
+  },
+  "queue": {
+    "enabled": true
+  }
+}
