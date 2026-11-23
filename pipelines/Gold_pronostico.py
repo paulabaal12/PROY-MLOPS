@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %pip install -q "mlflow>=2.10" "scikit-learn>=1.3"
 
 # COMMAND ----------
@@ -221,7 +225,15 @@ pron["version_modelo_uc"] = VERSION_UC
 
 # COMMAND ----------
 
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CAT}.gold")
+
 def guardar(pdf, tabla):
+    """Tabla administrada en el catálogo ({CAT}.gold.<tabla>). Si antes era externa (S3), se quita del catálogo
+    para que quede guardada en el catálogo y no encima de la copia de S3."""
+    if spark.catalog.tableExists(tabla):
+        tipo = spark.sql(f"DESCRIBE TABLE EXTENDED {tabla}").filter("col_name = 'Type'").collect()
+        if tipo and tipo[0]["data_type"].strip().upper() == "EXTERNAL":
+            spark.sql(f"DROP TABLE {tabla}")          # solo borra el registro; los archivos de S3 se quedan
     pdf = pdf.copy()
     for c in pdf.columns:
         if pd.api.types.is_datetime64_any_dtype(pdf[c]): pdf[c] = pdf[c].dt.date
@@ -231,7 +243,7 @@ def guardar(pdf, tabla):
     for c, t in sdf.dtypes:
         if t in ("double", "float"): sdf = sdf.withColumn(c, F.when(F.isnan(c), None).otherwise(F.col(c)))
     sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(tabla)
-    print("Escrito", tabla, sdf.count(), "filas")
+    print("Catálogo:", tabla, sdf.count(), "filas")
 
 if ESCRIBIR:
     ahora = pd.Timestamp.now()
@@ -265,7 +277,7 @@ else:
 
 # COMMAND ----------
 
-RUTA_ORO_S3 = _w("ruta_oro_s3", "", "Ruta S3 de Oro para la API (vacío = no copiar)").strip().rstrip("/")
+RUTA_ORO_S3 = _w("ruta_oro_s3", "s3://cc3105-au-869227452861-us-east-2-an/equipo4/gold", "Ruta S3 de Oro para la API (vacío = no copiar)").strip().rstrip("/")
 TABLAS_API = ["precio_semanal", "variacion_semanal", "features_modelo",
               "metricas_modelo", "predicciones", "pronostico_proxima_semana"]
 
@@ -279,3 +291,10 @@ if ESCRIBIR and RUTA_ORO_S3:
         print(f"copia para la API: {destino}")
 else:
     print("ruta_oro_s3 vacío o escribir = no: no se copia a S3")
+
+# --- Verificación: cada tabla en el catálogo y en S3 ---
+if ESCRIBIR:
+    for t in TABLAS_API:
+        n_cat = spark.table(f"{CAT}.gold.{t}").count()
+        n_s3 = spark.read.format("delta").load(f"{RUTA_ORO_S3}/{t}").count() if RUTA_ORO_S3 else None
+        print(f"{t:28s} catálogo: {n_cat:6d} | S3: {n_s3 if n_s3 is not None else '-'}")

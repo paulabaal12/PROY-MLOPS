@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Silver: lecturas de fotos validadas contra el MEM diario
 # MAGIC
@@ -137,18 +141,45 @@ lect["procesado_en"] = pd.Timestamp.now()
 
 # COMMAND ----------
 
-def guardar(pdf, tabla):
-    pdf = pdf.copy()
-    for c in pdf.columns:
-        if pdf[c].dtype == object: pdf[c] = pdf[c].astype("string")
-    sdf = spark.createDataFrame(pdf)
-    from pyspark.sql import functions as F
-    for c, t in sdf.dtypes:
-        if t in ("double", "float"): sdf = sdf.withColumn(c, F.when(F.isnan(c), None).otherwise(F.col(c)))
-    sdf.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(tabla)
-    print("Escrito", tabla, sdf.count(), "filas")
+from pyspark.sql import types as T
 
-lect["anio"] = lect["fecha_hora"].dt.year; lect["mes"] = lect["fecha_hora"].dt.month
+# --- Destino: external location xloc-ag (bucket silver, "Ag" = plata) ---
+RUTA_SILVER = "s3://cc3105-ag-869227452861-us-east-2-an/equipo4/"   # prefijo del equipo en el bucket silver
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CAT}.silver")
+
+def a_spark(pdf):
+    """pandas -> Spark con tipos explícitos (evita errores con columnas vacías o tipos de NumPy)."""
+    campos, conv = [], {}
+    for c in pdf.columns:
+        dt = pdf[c].dtype
+        if c == "fecha":
+            tipo, f = T.DateType(), (lambda v: pd.Timestamp(v).date())
+        elif pd.api.types.is_bool_dtype(dt):
+            tipo, f = T.BooleanType(), bool
+        elif pd.api.types.is_integer_dtype(dt):
+            tipo, f = T.LongType(), int
+        elif pd.api.types.is_float_dtype(dt):
+            tipo, f = T.DoubleType(), float
+        elif pd.api.types.is_datetime64_any_dtype(dt):
+            tipo, f = T.TimestampType(), (lambda v: pd.Timestamp(v).to_pydatetime())
+        else:
+            tipo, f = T.StringType(), str
+        campos.append(T.StructField(c, tipo, True))
+        conv[c] = f
+    filas = [tuple(None if pd.isna(v) else conv[c](v) for c, v in zip(pdf.columns, fila))
+             for fila in pdf.itertuples(index=False, name=None)]
+    return spark.createDataFrame(filas, schema=T.StructType(campos))
+
+def guardar(pdf, nombre):
+    """Escribe {CAT}.silver.<nombre> como tabla externa en s3://.../equipo4/<nombre>."""
+    nombre = nombre.split(".")[-1]                  # acepta "tabla" o "equipo4.silver.tabla"
+    tabla = f"{CAT}.silver.{nombre}"
+    spark.sql(f"DROP TABLE IF EXISTS {tabla}")      # la versión vieja estaba en el catálogo, no en S3
+    (a_spark(pdf).write.mode("overwrite").option("overwriteSchema", "true")
+        .option("path", f"{RUTA_SILVER}{nombre}").saveAsTable(tabla))
+    print(f"Silver: {tabla}  ({len(pdf)} filas) -> {RUTA_SILVER}{nombre}")
+
+lect["anio"] = lect["fecha_hora"].dt.year.astype("Int64"); lect["mes"] = lect["fecha_hora"].dt.month.astype("Int64")
 cols = (["archivo", "carpeta", "fecha_hora", "fecha", "anio", "mes", "dispositivo", "latitud", "longitud", "altitud_m"]
         + [x for c in TODOS for x in (c, f"{c}_origen", f"{c}_leido", f"{c}_descartado")]
         + [f"mem_{c}" for c in COMB]
@@ -156,14 +187,12 @@ cols = (["archivo", "carpeta", "fecha_hora", "fecha", "anio", "mes", "dispositiv
            "precios_de_foto", "precios_corregidos", "precios_rellenados", "precios_vacios", "procesado_en"])
 silver = lect[[c for c in cols if c in lect.columns]].sort_values("fecha_hora")
 silver["fecha"] = silver["fecha"].dt.date
-guardar(silver, f"{CAT}.silver.lecturas_fotos")
 
 # --- Revisión: fotos con algún precio no confiable ---
 hay = silver[[f"{c}_descartado" for c in COMB]].notna().any(axis=1) | silver["v_power_descartado"].notna() & (silver["v_power_descartado"] != "no se leyó")
 rev = silver[hay].copy()
 rev["motivos"] = rev.apply(lambda f: "; ".join(f"{c}: {f[c + '_descartado']}" for c in TODOS if pd.notna(f[c + "_descartado"]) and f[c + "_descartado"] != "no se leyó" or (c in COMB and pd.notna(f[c + "_descartado"]))), axis=1)
 rev = rev[["archivo", "fecha", "motivos", "diesel_leido", "regular_leido", "super_leido", "v_power_leido", "mem_diesel", "mem_regular", "mem_super", "precio_implicito", "venta_coincide"]]
-guardar(rev, f"{CAT}.silver.revision_fotos")
 
 # --- Validación: lectura original contra MEM del mismo día ---
 filas = []
@@ -172,7 +201,18 @@ for c in COMB:
     d["combustible"] = c; filas.append(d)
 val = pd.concat(filas); val = val[val["precio_foto"].notna() & val["precio_mem"].notna()].copy()
 val["dif"] = (val["precio_foto"] - val["precio_mem"]).round(2)
-guardar(val[["archivo", "fecha", "combustible", "origen", "precio_foto", "precio_mem", "dif"]], f"{CAT}.silver.validacion_fotos_vs_mem")
+val = val[["archivo", "fecha", "combustible", "origen", "precio_foto", "precio_mem", "dif"]]
+
+ok = silver[silver[TODOS].notna().any(axis=1)]
+print(f"Fotos: {len(silver)}  |  con precios: {len(ok)}  |  para revisar: {len(rev)}")
+if len(ok):
+    display(ok[TODOS].agg(["count", "mean", "min", "max"]).round(2))
+
+# ---- SILVER: tablas externas en xloc-ag ----
+guardar(silver, "lecturas_fotos")
+guardar(rev,    "revision_fotos")
+guardar(val,    "validacion_fotos_vs_mem")
+display(spark.table(f"{CAT}.silver.lecturas_fotos"))
 
 # COMMAND ----------
 
