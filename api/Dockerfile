@@ -5,7 +5,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ app/
-COPY datos_ejemplo/ datos_ejemplo/
 
 # No correr como root dentro del contenedor
 RUN useradd --create-home api && chown -R api /app

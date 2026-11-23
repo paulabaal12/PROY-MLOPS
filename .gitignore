@@ -1,0 +1,22 @@
+# Credenciales y llaves: NUNCA al repositorio
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.databrickscfg
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Logs y sistema
+logs/
+*.log
+.DS_Store
+Thumbs.db

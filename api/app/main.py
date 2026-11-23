@@ -1,8 +1,10 @@
 """API de precios de combustibles en Guatemala (lee solo la capa Oro).
 
-Lee las tablas Delta que escribe el notebook Gold_pronostico desde GOLD_URI:
-  - en el servidor:  s3://<bucket-oro>/equipo-04/gold   (credenciales de solo lectura en .env)
-  - en tu compu:     /app/datos_ejemplo                 (datos simulados con el mismo esquema)
+Lee las tablas Oro que escribe el notebook Gold_pronostico. Fuente, según el .env:
+  - "s3":         GOLD_URI=s3://<bucket-oro>/equipo4/gold + AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (solo lectura)
+  - "databricks": plan B si no hay llaves AWS: SELECT por SQL warehouse (DATABRICKS_HOST, DATABRICKS_TOKEN,
+                  DATABRICKS_WAREHOUSE_ID) sobre <DATABRICKS_CATALOGO>.<DATABRICKS_ESQUEMA>.<tabla>
+  - "local":      GOLD_URI=/app/datos_ejemplo (tablas Delta locales con el mismo esquema)
 
 Tablas que usa:
   precio_semanal             combustible, semana_inicio, promedio, precio_cierre, n_dias, fuente
@@ -11,9 +13,12 @@ Tablas que usa:
   metricas_modelo            modelo, escenario, accuracy, f1_macro, dif_vs_repetir, ic95_inf, ic95_sup, es_elegido, ...
   predicciones               combustible, semana_inicio, real, repetir, moda, <una columna por modelo>
 """
+import json
 import math
 import os
 import time
+import urllib.error
+import urllib.request
 from datetime import date, timedelta
 from enum import Enum
 from typing import Optional
@@ -30,6 +35,25 @@ LINEA_BASE = "repetir"                                           # "se repite la
 TABLAS = ["precio_semanal", "pronostico_proxima_semana", "metricas_modelo", "predicciones"]
 COLUMNAS_FECHA = {"semana_inicio", "semana_pronosticada", "generado_en"}
 CLASES = ["baja", "se_mantiene", "sube"]
+
+DBX_HOST = os.getenv("DATABRICKS_HOST", "").rstrip("/")
+DBX_TOKEN = os.getenv("DATABRICKS_TOKEN", "")
+DBX_WAREHOUSE = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
+DBX_TABLAS = f'{os.getenv("DATABRICKS_CATALOGO", "equipo4")}.{os.getenv("DATABRICKS_ESQUEMA", "gold")}'
+
+
+def _fuente() -> str:
+    """s3 si hay ruta s3:// con llaves AWS; si no, databricks si está configurado; si no, ruta local."""
+    hay_aws = bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"))
+    if GOLD_URI.startswith("s3://") and hay_aws:
+        return "s3"
+    if DBX_HOST and DBX_TOKEN and DBX_WAREHOUSE:
+        return "databricks"
+    return "s3" if GOLD_URI.startswith("s3://") else "local"
+
+
+FUENTE = _fuente()
+ORIGEN = f"databricks:{DBX_TABLAS}" if FUENTE == "databricks" else GOLD_URI
 
 app = FastAPI(
     title="Precios de combustibles Guatemala — Equipo 04",
@@ -60,12 +84,55 @@ def _opciones_s3() -> Optional[dict]:
     return opciones
 
 
+def _dbx(metodo: str, ruta: str, cuerpo: Optional[dict] = None) -> dict:
+    req = urllib.request.Request(
+        DBX_HOST + ruta, method=metodo, data=json.dumps(cuerpo).encode() if cuerpo else None,
+        headers={"Authorization": f"Bearer {DBX_TOKEN}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=70) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:            # 401 token inválido, 403 sin permiso, etc.
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
+
+
+def _leer_databricks(tabla: str) -> pd.DataFrame:
+    """SELECT * por el SQL warehouse (API Statement Execution) y tipos según el esquema que devuelve."""
+    r = _dbx("POST", "/api/2.0/sql/statements", {
+        "statement": f"SELECT * FROM {DBX_TABLAS}.{tabla}", "warehouse_id": DBX_WAREHOUSE,
+        "wait_timeout": "50s", "on_wait_timeout": "CONTINUE", "format": "JSON_ARRAY", "disposition": "INLINE"})
+    limite = time.time() + 240                     # el warehouse puede tardar en encender
+    while r["status"]["state"] in ("PENDING", "RUNNING") and time.time() < limite:
+        time.sleep(3)
+        r = _dbx("GET", f"/api/2.0/sql/statements/{r['statement_id']}")
+    if r["status"]["state"] != "SUCCEEDED":
+        raise RuntimeError(f"{r['status']['state']}: {r['status'].get('error', {}).get('message', '')[:300]}")
+    columnas = r["manifest"]["schema"]["columns"]
+    resultado = r.get("result") or {}
+    filas = list(resultado.get("data_array") or [])
+    while resultado.get("next_chunk_internal_link"):  # resultados grandes vienen en partes
+        resultado = _dbx("GET", resultado["next_chunk_internal_link"])
+        filas += resultado.get("data_array") or []
+    df = pd.DataFrame(filas, columns=[c["name"] for c in columnas])
+    for c in columnas:                             # la API devuelve todo como texto
+        tipo, n = c["type_name"].upper(), c["name"]
+        if tipo in ("INT", "LONG", "SHORT", "BYTE", "DOUBLE", "FLOAT", "DECIMAL"):
+            df[n] = pd.to_numeric(df[n], errors="coerce")
+        elif tipo == "BOOLEAN":
+            df[n] = df[n].map({"true": True, "false": False})
+        elif tipo in ("DATE", "TIMESTAMP", "TIMESTAMP_NTZ"):
+            df[n] = pd.to_datetime(df[n], errors="coerce")
+    return df
+
+
 def leer(tabla: str) -> pd.DataFrame:
     ahora = time.time()
     if tabla in _cache and ahora - _cache[tabla][0] < CACHE_SEG:
         return _cache[tabla][1]
     try:
-        df = DeltaTable(f"{GOLD_URI}/{tabla}", storage_options=_opciones_s3()).to_pandas()
+        if FUENTE == "databricks":
+            df = _leer_databricks(tabla)
+        else:
+            df = DeltaTable(f"{GOLD_URI}/{tabla}", storage_options=_opciones_s3()).to_pandas()
     except Exception as e:
         if tabla in _cache:                      # si S3 falla, se sirve lo último que se leyó
             return _cache[tabla][1]
@@ -78,15 +145,13 @@ def leer(tabla: str) -> pd.DataFrame:
 
 
 def _valor(v):
-    """Valor de pandas/numpy -> JSON (fechas como texto, NaN/NA como null)."""
+    """Valor de pandas/numpy -> JSON (fechas como texto; NaN, NA e infinito como null)."""
     if v is None or v is pd.NA or v is pd.NaT:
-        return None
-    if isinstance(v, float) and math.isnan(v):
         return None
     if hasattr(v, "item"):                       # numpy int/float/bool
         v = v.item()
-        if isinstance(v, float) and math.isnan(v):
-            return None
+    if isinstance(v, float) and not math.isfinite(v):   # inf sale p. ej. de dif_pct cuando la semana anterior vale 0
+        return None
     if hasattr(v, "isoformat"):
         return v.isoformat()
     return v
@@ -141,7 +206,7 @@ def health():
     ultima = None
     if estado["precio_semanal"].startswith("ok"):
         ultima = _valor(leer("precio_semanal")["semana_inicio"].max())
-    return {"status": "ok" if todo_ok else "degradado", "origen_datos": GOLD_URI,
+    return {"status": "ok" if todo_ok else "degradado", "fuente": FUENTE, "origen_datos": ORIGEN,
             "ultima_semana_con_precio": ultima, "tablas": estado}
 
 
